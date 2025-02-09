@@ -14,7 +14,7 @@ from collections import defaultdict, OrderedDict
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import reduce, tqdm, DataLoaderConfiguration
-from transformers import PreTrainedModel, pipeline, AutoTokenizer, default_data_collator
+from transformers import PreTrainedModel, PreTrainedTokenizer, pipeline, AutoTokenizer, default_data_collator
 from transformers.generation.utils import ModelOutput
 from torch.utils.data import DataLoader, RandomSampler
 import torch.nn.functional as F
@@ -134,6 +134,116 @@ def run_attack(cfg: config.LLMartConf) -> dict:
     accelerator.end_training()
 
     return results
+
+def run_attack_with_preinitialized_model(
+    cfg: config.LLMartConf,
+    model: PreTrainedModel,
+    hf_tokenizer: PreTrainedTokenizer,
+) -> dict:
+    """
+    Find an attack on a given *already-initialized* Hugging Face model and tokenizer.
+
+    Args:
+        cfg: Configuration object containing model, attack, and data parameters.
+        model: A pre-initialized Hugging Face model (e.g., from AutoModelForCausalLM).
+        hf_tokenizer: A pre-initialized Hugging Face tokenizer (e.g., from AutoTokenizer).
+
+    Returns:
+        results: Dictionary containing various results and metrics.
+    """
+
+    # Seed
+    torch.manual_seed(cfg.seed)
+    torch.use_deterministic_algorithms(cfg.use_deterministic_algorithms, warn_only=True)
+
+    # Setup Tensorboard
+    accelerator = Accelerator(
+        log_with="tensorboard",
+        project_dir=cfg.output_dir,
+        dataloader_config=DataLoaderConfiguration(
+            split_batches=cfg.data.split_batches
+            if cfg.data.split_batches is not None
+            else (True if cfg.data.n_train > 1 else False)
+        ),
+        step_scheduler_with_optimizer=False,
+    )
+    accelerator.init_trackers(cfg.experiment_name, config=cfg.asdict(flatten=True))
+
+    # Setup logging
+    transformers.logging.set_verbosity_error()
+    datasets.utils.disable_progress_bars()
+    log = get_logger(__name__)
+    log.info(f"{cfg.output_dir=}")
+
+    # Create attack and responses dataset transforms
+    attack_prompt = transforms.from_config(cfg.attack)
+    mask_completion = transforms.from_config(cfg.response)
+    assert isinstance(attack_prompt, AttackPrompt)
+
+    # OPTIONAL: Overwrite or set model-dependent fields on the passed tokenizer
+    if cfg.model.chat_template:
+        # If your HF tokenizer has a custom attribute, you can set it here
+        # (some specialized tokenizers do not have a `chat_template` field)
+        setattr(hf_tokenizer, "chat_template", cfg.model.chat_template)
+
+    hf_tokenizer.clean_up_tokenization_spaces = False
+
+    # Ensure the tokenizer has a pad_token (some GPT models do not)
+    if hf_tokenizer.pad_token is None and hf_tokenizer.eos_token is not None:
+        hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+    # Wrap the user-provided tokenizer in TaggedTokenizer
+    tokenizer = TaggedTokenizer(
+        hf_tokenizer,
+        tags=attack_prompt.tags + mask_completion.tags,
+    )
+
+    # Create data, apply attack transforms to it
+    with accelerator.main_process_first():
+        ds = data.from_config(
+            cfg.data,
+            tokenizer=tokenizer,
+            mark_prompt=attack_prompt,
+            mark_completion=mask_completion,
+        )
+
+    # Log some data examples
+    for name in filter(lambda name: len(ds[name]), ds):
+        log.info(f"{name} data:")
+        for i, (input_ids, input_map, attention_mask) in enumerate(
+            zip(
+                ds[name]["input_ids"], ds[name]["input_map"], ds[name]["attention_mask"]
+            )
+        ):
+            input_ids = list(itertools.compress(input_ids, attention_mask))
+            input_map = list(itertools.compress(input_map, attention_mask))
+            log.info(f"{i:4d}: {tokenizer.pretty_decode(input_ids, input_map)}")
+
+    # IMPORTANT: freeze the model weights
+    model.requires_grad_(False)
+
+    # Optimize attack
+    step, attack = 0, None
+    results = dict()
+    # If there are learnable adversarial tokens, run the training loop
+    if len(attack_prompt.elements) > 0:
+        step, attack, train_results = train(
+            ds, attack_prompt, tokenizer, model, cfg, accelerator, log
+        )
+        results.update(train_results)
+
+    # Evaluate on test data
+    test_dl = DataLoader(ds["test"], collate_fn=default_data_collator)
+    if len(test_dl):
+        log.info(f"== TEST @ {step} ==")
+        outputs = evaluate(test_dl, tokenizer, model, attack, log, max_new_tokens=512)
+        outputs = {f"eval/test_{key}": value for key, value in outputs.items()}
+        results.update(outputs)
+        accelerator.log(outputs, step=step)
+
+    accelerator.end_training()
+    return results
+
 
 
 def train(
