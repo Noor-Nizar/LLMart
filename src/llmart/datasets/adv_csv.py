@@ -18,6 +18,8 @@ class AdvCsvConfig(csv.CsvConfig):
         tokenizer: TaggedTokenizer,
         mark_prompt: Transform,
         mark_completion: Transform,
+        add_system: str,
+        mark_system: Transform,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -25,6 +27,8 @@ class AdvCsvConfig(csv.CsvConfig):
         self.tokenizer = tokenizer
         self.mark_prompt = mark_prompt
         self.mark_completion = mark_completion
+        self.add_system = add_system
+        self.mark_system = mark_system
 
 
 class AdvCsv(csv.Csv):

@@ -10,6 +10,9 @@ from .adv_csv import AdvCsv
 
 class AdvBenchBehavior(AdvCsv):
     def to_conversations(self, ds) -> list[list[dict]]:
+        add_system: Transform = self.config.add_system
+        mark_system: Transform = self.config.mark_system
+
         mark_prompt: Transform = self.config.mark_prompt  # type: ignore
         mark_completion: Transform = self.config.mark_completion  # type: ignore
         # Turn batch into conversation suitable for apply_chat_template
@@ -17,6 +20,7 @@ class AdvBenchBehavior(AdvCsv):
         for d in ds:
             assert isinstance(d, dict)
             conv = [
+                dict(role="system", content=mark_system(add_system)),
                 dict(role="user", content=mark_prompt(d["goal"])),
                 dict(role="assistant", content=mark_completion(d["target"])),
             ]
