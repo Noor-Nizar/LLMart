@@ -159,7 +159,7 @@ class AdvBenchBehavior(DataConf):
     )
 
     # Default to first sample
-    subset: list[int] | None = field(default_factory=lambda: [0])
+    # subset: list[int] | None = field(default_factory=lambda: [0])
 
 
 @dataclass(kw_only=True)
@@ -170,7 +170,7 @@ class AdvBenchJudge(DataConf):
     )
 
     # Default to first sample
-    subset: list[int] | None = field(default_factory=lambda: [0])
+    # subset: list[int] | None = field(default_factory=lambda: [0])
 
 
 cs.store(name="custom", group="data", node=DataConf)
